@@ -11,18 +11,18 @@ const STATIC = {
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
 };
 
-function createStore() {
+function createStore({ verificationDelayMs = 4000 } = {}) {
   let version = 1;
   let tasks = [{
     id: 'WO-1042', technician: TECHNICIAN, room: 'Server Room B', asset: 'Rack B-04',
     title: 'Inspect air handling unit', instructions: 'Check filter and record temperature.',
-    due: '2026-09-20T12:00', status: 'pending', checklist: [
+    due: '2026-09-20T12:00', status: 'assigned', checklist: [
       { label: 'Check filter', done: false },
       { label: 'Record temperature', done: false },
       { label: 'Submit notes', done: false },
-    ], checkInAt: null,
+    ], checkInAt: null, verifiedAt: null, tapAttempt: null,
   }];
-  let events = [{ id: randomUUID(), time: new Date().toISOString(), kind: 'info', text: 'Demo workspace ready. Work order WO-1042 awaits approval.' }];
+  let events = [{ id: randomUUID(), time: new Date().toISOString(), kind: 'info', text: 'Demo workspace ready. Work order WO-1042 assigned to technician.' }];
 
   function log(kind, text) {
     events.unshift({ id: randomUUID(), time: new Date().toISOString(), kind, text });
@@ -48,43 +48,43 @@ function createStore() {
       const room = input.room;
       if (!title || !asset || !instructions || !due || !ROOMS.includes(room)) throw Object.assign(new Error('Complete all task fields'), { status: 400 });
       const id = `WO-${String(Date.now()).slice(-7)}`;
-      tasks.push({ id, technician: TECHNICIAN, room, asset, title, instructions, due, status: 'pending', checklist: [
+      tasks.push({ id, technician: TECHNICIAN, room, asset, title, instructions, due, status: 'assigned', checklist: [
         { label: 'Inspect assigned equipment', done: false },
         { label: 'Record findings', done: false },
         { label: 'Submit maintenance notes', done: false },
-      ], checkInAt: null });
-      log('task', `${id} assigned to ${TECHNICIAN} for ${room}. Approval required.`);
+      ], checkInAt: null, verifiedAt: null, tapAttempt: null });
+      log('task', `${id} assigned to ${TECHNICIAN} for ${room}. Sent to technician.`);
       return snapshot(role);
     }
     const task = tasks.find((item) => item.id === input.id);
     if (!task) throw Object.assign(new Error('Work order not found'), { status: 404 });
-    if (action === 'approve') {
-      supervisorOnly(role);
-      if (task.status !== 'pending') throw Object.assign(new Error('Only pending work can be approved'), { status: 409 });
-      task.status = 'approved';
-      log('approved', `${task.id} approved for ${task.room}.`);
-    } else if (action === 'checkin') {
-      supervisorOnly(role);
+    if (action === 'tap') {
+      if (role !== 'technician') throw Object.assign(new Error('Technician action only'), { status: 403 });
       if (task.room !== 'Server Room B') throw Object.assign(new Error('The demo NFC reader is assigned to Server Room B only'), { status: 409 });
-      if (task.status !== 'approved') throw Object.assign(new Error('Approve the work order before check-in'), { status: 409 });
-      task.status = 'checked_in';
+      if (!['assigned', 'rejected'].includes(task.status)) throw Object.assign(new Error('This task cannot start a new NFC verification'), { status: 409 });
+      task.status = 'verifying';
       task.checkInAt = new Date().toISOString();
-      log('checkin', `Simulated NFC check-in: ${task.technician}, ${task.room}, ${task.id}.`);
+      task.verifiedAt = null;
+      task.tapAttempt = randomUUID();
+      const attempt = task.tapAttempt;
+      log('checkin', `Simulated NFC tap: ${task.technician}, ${task.room}, ${task.id}. Waiting for verification.`);
+      const timer = setTimeout(() => resolveVerification(task.id, true, attempt), verificationDelayMs);
+      timer.unref?.();
     } else if (action === 'revoke') {
       supervisorOnly(role);
-      if (!['approved', 'checked_in'].includes(task.status)) throw Object.assign(new Error('This work order has no active approval'), { status: 409 });
+      if (!['assigned', 'verifying', 'verified'].includes(task.status)) throw Object.assign(new Error('This work order is already closed'), { status: 409 });
       task.status = 'revoked';
-      log('warning', `${task.id} access revoked by supervisor.`);
+      log('warning', `${task.id} assignment or access revoked by supervisor.`);
     } else if (action === 'checklist') {
       if (role !== 'technician') throw Object.assign(new Error('Technician action only'), { status: 403 });
-      if (task.technician !== TECHNICIAN || task.status !== 'checked_in') throw Object.assign(new Error('Check in before updating the checklist'), { status: 409 });
+      if (task.technician !== TECHNICIAN || task.status !== 'verified') throw Object.assign(new Error('Wait for successful NFC verification before updating the checklist'), { status: 409 });
       const index = Number(input.index);
       if (!Number.isInteger(index) || index < 0 || index >= task.checklist.length) throw Object.assign(new Error('Invalid checklist item'), { status: 400 });
       task.checklist[index].done = !task.checklist[index].done;
       log('task', `${task.id}: ${task.checklist[index].label} ${task.checklist[index].done ? 'completed' : 'reopened'}.`);
     } else if (action === 'complete') {
       if (role !== 'technician') throw Object.assign(new Error('Technician action only'), { status: 403 });
-      if (task.technician !== TECHNICIAN || task.status !== 'checked_in') throw Object.assign(new Error('Check in before completing the task'), { status: 409 });
+      if (task.technician !== TECHNICIAN || task.status !== 'verified') throw Object.assign(new Error('Wait for successful NFC verification before completing the task'), { status: 409 });
       if (!task.checklist.every((item) => item.done)) throw Object.assign(new Error('Complete the checklist first'), { status: 409 });
       task.status = 'completed';
       log('approved', `${task.id} completed by ${task.technician}.`);
@@ -93,7 +93,15 @@ function createStore() {
     }
     return snapshot(role);
   }
-  return { snapshot, act };
+  function resolveVerification(id, passed, attempt) {
+    const task = tasks.find((item) => item.id === id);
+    if (!task || task.status !== 'verifying' || (attempt && task.tapAttempt !== attempt)) return false;
+    task.status = passed ? 'verified' : 'rejected';
+    task.verifiedAt = passed ? new Date().toISOString() : null;
+    log(passed ? 'approved' : 'warning', `${task.id} NFC verification ${passed ? 'passed; room access granted' : 'failed; room access denied'} (simulated).`);
+    return true;
+  }
+  return { snapshot, act, resolveVerification };
 }
 
 function clean(value, maximum) {

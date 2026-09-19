@@ -2,30 +2,34 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createStore, createServer } = require('./server');
 
-test('supervisor changes appear in technician view without exposing admin events', () => {
+test('assignment reaches technician immediately, then NFC waits for verification', () => {
   const store = createStore();
   const id = store.snapshot('technician').tasks[0].id;
   assert.equal(store.snapshot('technician').events, undefined);
-  store.act('supervisor', 'approve', { id });
-  assert.equal(store.snapshot('technician').tasks[0].status, 'approved');
-  store.act('supervisor', 'checkin', { id });
-  assert.equal(store.snapshot('technician').tasks[0].status, 'checked_in');
+  assert.equal(store.snapshot('technician').tasks[0].status, 'assigned');
+  store.act('technician', 'tap', { id });
+  assert.equal(store.snapshot('technician').tasks[0].status, 'verifying');
   assert.equal(store.snapshot('supervisor').events[0].kind, 'checkin');
+  store.resolveVerification(id, true);
+  assert.equal(store.snapshot('technician').tasks[0].status, 'verified');
 });
 
-test('technician cannot approve or bypass check-in', () => {
+test('only technician can initiate NFC tap; work is locked before verification', () => {
   const store = createStore();
   const id = store.snapshot('technician').tasks[0].id;
-  assert.throws(() => store.act('technician', 'approve', { id }), { status: 403 });
+  assert.throws(() => store.act('supervisor', 'tap', { id }), { status: 403 });
   assert.throws(() => store.act('technician', 'complete', { id }), { status: 409 });
+  assert.throws(() => store.act('technician', 'checklist', { id, index: 0 }), { status: 409 });
+  store.act('technician', 'tap', { id });
   assert.throws(() => store.act('technician', 'checklist', { id, index: 0 }), { status: 409 });
 });
 
-test('task completion needs approval, check-in, and all checklist items', () => {
+test('task completion needs successful verification and all checklist items', () => {
   const store = createStore();
   const id = store.snapshot('technician').tasks[0].id;
-  store.act('supervisor', 'approve', { id });
-  store.act('supervisor', 'checkin', { id });
+  store.act('technician', 'tap', { id });
+  assert.throws(() => store.act('technician', 'complete', { id }), { status: 409 });
+  store.resolveVerification(id, true);
   assert.throws(() => store.act('technician', 'complete', { id }), { status: 409 });
   for (const index of [0, 1, 2]) store.act('technician', 'checklist', { id, index });
   store.act('technician', 'complete', { id });
@@ -36,8 +40,27 @@ test('one demo reader cannot check in a different room', () => {
   const store = createStore();
   store.act('supervisor', 'create', { title: 'Inspect switch', asset: 'Rack A-01', instructions: 'Record status.', due: '2026-09-20T12:00', room: 'Server Room A' });
   const id = store.snapshot('supervisor').tasks.at(-1).id;
-  store.act('supervisor', 'approve', { id });
-  assert.throws(() => store.act('supervisor', 'checkin', { id }), { status: 409 });
+  assert.equal(store.snapshot('technician').tasks.at(-1).status, 'assigned');
+  assert.throws(() => store.act('technician', 'tap', { id }), { status: 409 });
+});
+
+test('failed verification never grants access and can be retried', () => {
+  const store = createStore();
+  const id = store.snapshot('technician').tasks[0].id;
+  store.act('technician', 'tap', { id });
+  store.resolveVerification(id, false);
+  assert.equal(store.snapshot('technician').tasks[0].status, 'rejected');
+  assert.throws(() => store.act('technician', 'checklist', { id, index: 0 }), { status: 409 });
+  store.act('technician', 'tap', { id });
+  assert.equal(store.snapshot('technician').tasks[0].status, 'verifying');
+});
+
+test('automatic simulated verification advances after a short delay', async () => {
+  const store = createStore({ verificationDelayMs: 10 });
+  const id = store.snapshot('technician').tasks[0].id;
+  store.act('technician', 'tap', { id });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(store.snapshot('technician').tasks[0].status, 'verified');
 });
 
 test('HTTP port role controls returned data and actions', async (t) => {
@@ -48,7 +71,7 @@ test('HTTP port role controls returned data and actions', async (t) => {
   const state = await (await fetch(`${base}/api/state`)).json();
   assert.equal(state.role, 'technician');
   assert.equal(state.events, undefined);
-  const forbidden = await fetch(`${base}/api/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'approve', id: 'WO-1042' }) });
+  const forbidden = await fetch(`${base}/api/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'revoke', id: 'WO-1042' }) });
   assert.equal(forbidden.status, 403);
 });
 

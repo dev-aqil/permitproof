@@ -1,6 +1,6 @@
 # PermitProof
 
-PermitProof is a *public interaction prototype* for server-room maintenance workflows. It shows work-order approval, a simulated NFC check-in, and technician checklists across two views.
+PermitProof is a *public interaction prototype* for server-room maintenance workflows. Supervisor-created work orders appear immediately in the technician view. A simulated NFC tap changes the task to **Waiting for verification** on both dashboards. After a short simulated verification delay, the task becomes **Verification done**, room access lights up, and the technician checklist unlocks. No second supervisor approval is required.
 
 ## Run
 
@@ -12,4 +12,4 @@ Run `npm test` for workflow and HTTP route checks. Build the container with `doc
 
 ## Demo limits
 
-There is no authentication, real NFC verification, Raspberry Pi connection, or live occupancy proof. All visitors to one running instance share the same in-memory demo state, which resets on restart. Do not enter real operational data or use this prototype to control access.
+There is no authentication, real NFC verification, Raspberry Pi connection, or live occupancy proof. The timed verification result is only a UI simulation; replace it with an authenticated result from the real verifier before any actual access decision. All visitors to one running instance share the same in-memory demo state, which resets on restart. Do not enter real operational data or use this prototype to control access.
