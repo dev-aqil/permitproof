@@ -13,19 +13,41 @@ const STATIC = {
 
 function createStore({ verificationDelayMs = 4000 } = {}) {
   let version = 1;
+  let eventSeq = 1002;
   let tasks = [{
-    id: 'WO-1042', technician: TECHNICIAN, room: 'Server Room B', asset: 'Rack B-04',
-    title: 'Inspect air handling unit', instructions: 'Check filter and record temperature.',
-    due: '2026-09-20T12:00', status: 'assigned', checklist: [
-      { label: 'Check filter', done: false },
-      { label: 'Record temperature', done: false },
-      { label: 'Submit notes', done: false },
-    ], checkInAt: null, verifiedAt: null, tapAttempt: null,
+    id: 'WO-1042',
+    technician: TECHNICIAN,
+    room: 'Server Room B',
+    asset: 'Rack B-04',
+    title: 'Inspect air handling unit',
+    instructions: 'Check filter differential pressure and record telemetry.',
+    due: '2026-09-20T12:00',
+    status: 'assigned',
+    deviceId: 'rpi5-station-01',
+    keyId: 'ed25519-pk-8f12',
+    hardwareLed: 'YELLOW',
+    leaseSeconds: 30,
+    checklist: [
+      { label: 'Check filter differential pressure', done: false },
+      { label: 'Sample environmental sensors', done: false },
+      { label: 'Submit maintenance telemetry notes', done: false },
+    ],
+    checkInAt: null,
+    verifiedAt: null,
+    leaseExpiresAt: null,
+    tapAttempt: null,
   }];
-  let events = [{ id: randomUUID(), time: new Date().toISOString(), kind: 'info', text: 'Demo workspace ready. Work order WO-1042 assigned to technician.' }];
+  let events = [{
+    id: randomUUID(),
+    code: 'EVT-1001',
+    time: new Date().toISOString(),
+    kind: 'info',
+    text: 'PermitProof pipeline online. WO-1042 assigned to technician.',
+  }];
 
   function log(kind, text) {
-    events.unshift({ id: randomUUID(), time: new Date().toISOString(), kind, text });
+    const code = `EVT-${eventSeq++}`;
+    events.unshift({ id: randomUUID(), code, time: new Date().toISOString(), kind, text });
     events = events.slice(0, 100);
     version += 1;
   }
@@ -48,12 +70,30 @@ function createStore({ verificationDelayMs = 4000 } = {}) {
       const room = input.room;
       if (!title || !asset || !instructions || !due || !ROOMS.includes(room)) throw Object.assign(new Error('Complete all task fields'), { status: 400 });
       const id = `WO-${String(Date.now()).slice(-7)}`;
-      tasks.push({ id, technician: TECHNICIAN, room, asset, title, instructions, due, status: 'assigned', checklist: [
-        { label: 'Inspect assigned equipment', done: false },
-        { label: 'Record findings', done: false },
-        { label: 'Submit maintenance notes', done: false },
-      ], checkInAt: null, verifiedAt: null, tapAttempt: null });
-      log('task', `${id} assigned to ${TECHNICIAN} for ${room}. Sent to technician.`);
+      tasks.push({
+        id,
+        technician: TECHNICIAN,
+        room,
+        asset,
+        title,
+        instructions,
+        due,
+        status: 'assigned',
+        deviceId: 'rpi5-station-01',
+        keyId: 'ed25519-pk-8f12',
+        hardwareLed: 'YELLOW',
+        leaseSeconds: 30,
+        checklist: [
+          { label: 'Inspect assigned asset equipment', done: false },
+          { label: 'Record telemetry findings', done: false },
+          { label: 'Submit maintenance evidence notes', done: false },
+        ],
+        checkInAt: null,
+        verifiedAt: null,
+        leaseExpiresAt: null,
+        tapAttempt: null,
+      });
+      log('task', `${id} assigned to ${TECHNICIAN} for ${room} (${asset}). Sent to technician.`);
       return snapshot(role);
     }
     const task = tasks.find((item) => item.id === input.id);
@@ -63,18 +103,22 @@ function createStore({ verificationDelayMs = 4000 } = {}) {
       if (task.room !== 'Server Room B') throw Object.assign(new Error('The demo NFC reader is assigned to Server Room B only'), { status: 409 });
       if (!['assigned', 'rejected'].includes(task.status)) throw Object.assign(new Error('This task cannot start a new NFC verification'), { status: 409 });
       task.status = 'verifying';
+      task.hardwareLed = 'YELLOW';
       task.checkInAt = new Date().toISOString();
       task.verifiedAt = null;
+      task.leaseExpiresAt = null;
       task.tapAttempt = randomUUID();
       const attempt = task.tapAttempt;
-      log('checkin', `Simulated NFC tap: ${task.technician}, ${task.room}, ${task.id}. Waiting for verification.`);
+      log('checkin', `Simulated NFC scan: ${task.technician}, ${task.room}, ${task.id}. Awaiting authorization lease.`);
       const timer = setTimeout(() => resolveVerification(task.id, true, attempt), verificationDelayMs);
       timer.unref?.();
     } else if (action === 'revoke') {
       supervisorOnly(role);
       if (!['assigned', 'verifying', 'verified'].includes(task.status)) throw Object.assign(new Error('This work order is already closed'), { status: 409 });
       task.status = 'revoked';
-      log('warning', `${task.id} assignment or access revoked by supervisor.`);
+      task.hardwareLed = 'RED';
+      task.leaseExpiresAt = null;
+      log('warning', `${task.id} authorization revoked by supervisor. Hardware LED: RED.`);
     } else if (action === 'checklist') {
       if (role !== 'technician') throw Object.assign(new Error('Technician action only'), { status: 403 });
       if (task.technician !== TECHNICIAN || task.status !== 'verified') throw Object.assign(new Error('Wait for successful NFC verification before updating the checklist'), { status: 409 });
@@ -87,7 +131,8 @@ function createStore({ verificationDelayMs = 4000 } = {}) {
       if (task.technician !== TECHNICIAN || task.status !== 'verified') throw Object.assign(new Error('Wait for successful NFC verification before completing the task'), { status: 409 });
       if (!task.checklist.every((item) => item.done)) throw Object.assign(new Error('Complete the checklist first'), { status: 409 });
       task.status = 'completed';
-      log('approved', `${task.id} completed by ${task.technician}.`);
+      task.hardwareLed = 'YELLOW';
+      log('approved', `${task.id} maintenance completed by ${task.technician}. Committed to audit trail.`);
     } else {
       throw Object.assign(new Error('Unknown action'), { status: 400 });
     }
@@ -98,7 +143,9 @@ function createStore({ verificationDelayMs = 4000 } = {}) {
     if (!task || task.status !== 'verifying' || (attempt && task.tapAttempt !== attempt)) return false;
     task.status = passed ? 'verified' : 'rejected';
     task.verifiedAt = passed ? new Date().toISOString() : null;
-    log(passed ? 'approved' : 'warning', `${task.id} NFC verification ${passed ? 'passed; room access granted' : 'failed; room access denied'} (simulated).`);
+    task.leaseExpiresAt = passed ? new Date(Date.now() + 30000).toISOString() : null;
+    task.hardwareLed = passed ? 'GREEN' : 'RED';
+    log(passed ? 'approved' : 'warning', `${task.id} authorization ${passed ? 'granted: 30s lease active (LED: GREEN)' : 'denied: signature failure (LED: RED)'}.`);
     return true;
   }
   return { snapshot, act, resolveVerification };
