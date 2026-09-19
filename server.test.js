@@ -9,7 +9,7 @@ test('assignment reaches technician immediately, then NFC waits for verification
   assert.equal(store.snapshot('technician').tasks[0].status, 'assigned');
   store.act('technician', 'tap', { id });
   assert.equal(store.snapshot('technician').tasks[0].status, 'verifying');
-  assert.equal(store.snapshot('supervisor').events[0].kind, 'checkin');
+  assert.ok(store.snapshot('supervisor').events.some((e) => e.kind === 'checkin'));
   store.resolveVerification(id, true);
   assert.equal(store.snapshot('technician').tasks[0].status, 'verified');
 });
@@ -44,8 +44,8 @@ test('one demo reader cannot check in a different room', () => {
   assert.throws(() => store.act('technician', 'tap', { id }), { status: 409 });
 });
 
-test('failed verification never grants access and can be retried', () => {
-  const store = createStore();
+test('failed verification never grants access and can be retried with cooldown override', () => {
+  const store = createStore({ rateLimitCooldownMs: 0 });
   const id = store.snapshot('technician').tasks[0].id;
   store.act('technician', 'tap', { id });
   store.resolveVerification(id, false);
@@ -53,6 +53,30 @@ test('failed verification never grants access and can be retried', () => {
   assert.throws(() => store.act('technician', 'checklist', { id, index: 0 }), { status: 409 });
   store.act('technician', 'tap', { id });
   assert.equal(store.snapshot('technician').tasks[0].status, 'verifying');
+});
+
+test('2FA OTP verification authenticates technician session', () => {
+  const store = createStore();
+  const id = store.snapshot('technician').tasks[0].id;
+  store.act('technician', 'tap', { id });
+  const otp = store.getDevOtp();
+  assert.ok(otp && otp.length === 6);
+  assert.equal(store.snapshot('technician').auth_state.otp_pending, true);
+
+  // Incorrect OTP decreases attempts
+  assert.throws(() => store.act('technician', 'verify_otp', { otp: '000000' }), { status: 400 });
+  assert.equal(store.snapshot('technician').auth_state.attempts_remaining, 2);
+
+  // Correct OTP authenticates
+  store.act('technician', 'verify_otp', { otp });
+  assert.equal(store.snapshot('technician').auth_state.authenticated, true);
+  assert.equal(store.snapshot('technician').auth_state.otp_pending, false);
+});
+
+test('IDOR protection denies technician access to foreign task', () => {
+  const store = createStore();
+  // Attempting action on non-existent or unassigned task throws 404 or 403
+  assert.throws(() => store.act('technician', 'tap', { id: 'WO-UNKNOWN' }), { status: 404 });
 });
 
 test('automatic simulated verification advances after a short delay', async () => {
@@ -75,7 +99,25 @@ test('HTTP port role controls returned data and actions', async (t) => {
   assert.equal(forbidden.status, 403);
 });
 
-test('hosted single-port routes serve both demo roles and health', async (t) => {
+test('audit log endpoint requires supervisor clearance', async (t) => {
+  const techServer = createServer(1501, createStore());
+  await new Promise((resolve) => techServer.listen(0, '127.0.0.1', resolve));
+  t.after(() => techServer.close());
+  const techBase = `http://127.0.0.1:${techServer.address().port}`;
+  const techRes = await fetch(`${techBase}/api/audit-log`);
+  assert.equal(techRes.status, 403);
+
+  const supServer = createServer(1502, createStore());
+  await new Promise((resolve) => supServer.listen(0, '127.0.0.1', resolve));
+  t.after(() => supServer.close());
+  const supBase = `http://127.0.0.1:${supServer.address().port}`;
+  const supRes = await fetch(`${supBase}/api/audit-log`);
+  assert.equal(supRes.status, 200);
+  const events = await supRes.json();
+  assert.ok(Array.isArray(events));
+});
+
+test('hosted single-port routes serve both demo roles, SPA, and health', async (t) => {
   const server = createServer(8080, createStore());
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => server.close());
@@ -85,4 +127,5 @@ test('hosted single-port routes serve both demo roles and health', async (t) => 
   assert.equal((await (await fetch(`${base}/supervisor/api/state`)).json()).role, 'supervisor');
   assert.equal((await (await fetch(`${base}/api/state`)).json()).role, 'supervisor');
   assert.equal((await fetch(`${base}/technician/`)).status, 200);
+  assert.equal((await fetch(`${base}/supervisor`)).status, 200);
 });
