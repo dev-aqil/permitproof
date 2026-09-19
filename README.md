@@ -1,2 +1,15 @@
-# permitproof
-PermitProof dashboard prototype
+# PermitProof
+
+PermitProof is a *public interaction prototype* for server-room maintenance workflows. It shows work-order approval, a simulated NFC check-in, and technician checklists across two views.
+
+## Run
+
+Use Node.js 18 or newer. Run `npm start` with no install step. The local launcher is at `http://localhost:1500`, the technician view at port 1501, and the supervisor view at port 1502. If port 1500 is occupied, the launcher uses port 1503.
+
+For a single-port deployment, set `PORT=8080` and run `npm start`. The supervisor dashboard opens at `/`, the technician view is at `/technician/`, and the health endpoint is at `/health`.
+
+Run `npm test` for workflow and HTTP route checks. Build the container with `docker build -t permitproof .`.
+
+## Demo limits
+
+There is no authentication, real NFC verification, Raspberry Pi connection, or live occupancy proof. All visitors to one running instance share the same in-memory demo state, which resets on restart. Do not enter real operational data or use this prototype to control access.

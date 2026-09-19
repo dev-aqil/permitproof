@@ -1,0 +1,165 @@
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+const { randomUUID } = require('node:crypto');
+
+const ROOMS = ['Server Room A', 'Server Room B', 'Server Room C'];
+const TECHNICIAN = 'Amir H.';
+const STATIC = {
+  '/': ['index.html', 'text/html; charset=utf-8'],
+  '/styles.css': ['styles.css', 'text/css; charset=utf-8'],
+  '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
+};
+
+function createStore() {
+  let version = 1;
+  let tasks = [{
+    id: 'WO-1042', technician: TECHNICIAN, room: 'Server Room B', asset: 'Rack B-04',
+    title: 'Inspect air handling unit', instructions: 'Check filter and record temperature.',
+    due: '2026-09-20T12:00', status: 'pending', checklist: [
+      { label: 'Check filter', done: false },
+      { label: 'Record temperature', done: false },
+      { label: 'Submit notes', done: false },
+    ], checkInAt: null,
+  }];
+  let events = [{ id: randomUUID(), time: new Date().toISOString(), kind: 'info', text: 'Demo workspace ready. Work order WO-1042 awaits approval.' }];
+
+  function log(kind, text) {
+    events.unshift({ id: randomUUID(), time: new Date().toISOString(), kind, text });
+    events = events.slice(0, 100);
+    version += 1;
+  }
+  function snapshot(role) {
+    if (role === 'technician') {
+      return {
+        version, role, technician: TECHNICIAN, rooms: ROOMS,
+        tasks: tasks.filter((task) => task.technician === TECHNICIAN),
+      };
+    }
+    return { version, role, technician: TECHNICIAN, rooms: ROOMS, tasks, events };
+  }
+  function act(role, action, input) {
+    if (action === 'create') {
+      if (role !== 'supervisor') throw Object.assign(new Error('Supervisor action only'), { status: 403 });
+      const title = clean(input.title, 100);
+      const asset = clean(input.asset, 60);
+      const instructions = clean(input.instructions, 500);
+      const due = clean(input.due, 40);
+      const room = input.room;
+      if (!title || !asset || !instructions || !due || !ROOMS.includes(room)) throw Object.assign(new Error('Complete all task fields'), { status: 400 });
+      const id = `WO-${String(Date.now()).slice(-7)}`;
+      tasks.push({ id, technician: TECHNICIAN, room, asset, title, instructions, due, status: 'pending', checklist: [
+        { label: 'Inspect assigned equipment', done: false },
+        { label: 'Record findings', done: false },
+        { label: 'Submit maintenance notes', done: false },
+      ], checkInAt: null });
+      log('task', `${id} assigned to ${TECHNICIAN} for ${room}. Approval required.`);
+      return snapshot(role);
+    }
+    const task = tasks.find((item) => item.id === input.id);
+    if (!task) throw Object.assign(new Error('Work order not found'), { status: 404 });
+    if (action === 'approve') {
+      supervisorOnly(role);
+      if (task.status !== 'pending') throw Object.assign(new Error('Only pending work can be approved'), { status: 409 });
+      task.status = 'approved';
+      log('approved', `${task.id} approved for ${task.room}.`);
+    } else if (action === 'checkin') {
+      supervisorOnly(role);
+      if (task.room !== 'Server Room B') throw Object.assign(new Error('The demo NFC reader is assigned to Server Room B only'), { status: 409 });
+      if (task.status !== 'approved') throw Object.assign(new Error('Approve the work order before check-in'), { status: 409 });
+      task.status = 'checked_in';
+      task.checkInAt = new Date().toISOString();
+      log('checkin', `Simulated NFC check-in: ${task.technician}, ${task.room}, ${task.id}.`);
+    } else if (action === 'revoke') {
+      supervisorOnly(role);
+      if (!['approved', 'checked_in'].includes(task.status)) throw Object.assign(new Error('This work order has no active approval'), { status: 409 });
+      task.status = 'revoked';
+      log('warning', `${task.id} access revoked by supervisor.`);
+    } else if (action === 'checklist') {
+      if (role !== 'technician') throw Object.assign(new Error('Technician action only'), { status: 403 });
+      if (task.technician !== TECHNICIAN || task.status !== 'checked_in') throw Object.assign(new Error('Check in before updating the checklist'), { status: 409 });
+      const index = Number(input.index);
+      if (!Number.isInteger(index) || index < 0 || index >= task.checklist.length) throw Object.assign(new Error('Invalid checklist item'), { status: 400 });
+      task.checklist[index].done = !task.checklist[index].done;
+      log('task', `${task.id}: ${task.checklist[index].label} ${task.checklist[index].done ? 'completed' : 'reopened'}.`);
+    } else if (action === 'complete') {
+      if (role !== 'technician') throw Object.assign(new Error('Technician action only'), { status: 403 });
+      if (task.technician !== TECHNICIAN || task.status !== 'checked_in') throw Object.assign(new Error('Check in before completing the task'), { status: 409 });
+      if (!task.checklist.every((item) => item.done)) throw Object.assign(new Error('Complete the checklist first'), { status: 409 });
+      task.status = 'completed';
+      log('approved', `${task.id} completed by ${task.technician}.`);
+    } else {
+      throw Object.assign(new Error('Unknown action'), { status: 400 });
+    }
+    return snapshot(role);
+  }
+  return { snapshot, act };
+}
+
+function clean(value, maximum) {
+  return typeof value === 'string' ? value.trim().slice(0, maximum) : '';
+}
+function supervisorOnly(role) {
+  if (role !== 'supervisor') throw Object.assign(new Error('Supervisor action only'), { status: 403 });
+}
+function sendJson(res, status, data) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+  res.end(JSON.stringify(data));
+}
+function createServer(port, store) {
+  const localRole = port === 1501 ? 'technician' : port === 1502 ? 'supervisor' : 'launcher';
+  return http.createServer((req, res) => {
+    const url = new URL(req.url, `http://localhost:${port}`);
+    if (port === 8080 && url.pathname === '/health') return sendJson(res, 200, { status: 'ok' });
+    const role = port === 8080
+      ? url.pathname.startsWith('/technician/') ? 'technician' : 'supervisor'
+      : localRole;
+    const assetPath = port === 8080 ? url.pathname.replace(/^\/(technician|supervisor)(?=\/)/, '') : url.pathname;
+    const routePath = port === 8080 ? assetPath : url.pathname;
+    if (routePath === '/api/state' && req.method === 'GET') {
+      if (role === 'launcher') return sendJson(res, 403, { error: 'Open a role dashboard' });
+      return sendJson(res, 200, store.snapshot(role));
+    }
+    if (routePath === '/api/action' && req.method === 'POST') {
+      if (role === 'launcher') return sendJson(res, 403, { error: 'Open a role dashboard' });
+      let body = '';
+      req.on('data', (chunk) => {
+        body += chunk;
+        if (body.length > 32768) req.destroy();
+      });
+      req.on('end', () => {
+        try {
+          const { action, ...input } = JSON.parse(body);
+          sendJson(res, 200, store.act(role, action, input));
+        } catch (error) {
+          sendJson(res, error.status || 400, { error: error.message || 'Invalid request' });
+        }
+      });
+      return;
+    }
+    if (req.method !== 'GET' || !STATIC[assetPath]) return sendJson(res, 404, { error: 'Not found' });
+    const [file, type] = STATIC[assetPath];
+    const content = fs.readFileSync(path.join(__dirname, 'public', file));
+    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+    res.end(content);
+  });
+}
+
+if (require.main === module) {
+  const store = createStore();
+  const hosted = process.env.PORT === '8080';
+  for (const port of hosted ? [8080] : [1500, 1501, 1502, 1503]) {
+    const server = createServer(port, store);
+    server.on('error', (error) => {
+      if (port === 1500 && error.code === 'EADDRINUSE') {
+        console.warn('Port 1500 is occupied by another app. PermitProof launcher remains available on 1503.');
+      } else {
+        console.error(`Cannot start port ${port}: ${error.message}`);
+        process.exitCode = 1;
+      }
+    });
+    server.listen(port, hosted ? '0.0.0.0' : '127.0.0.1', () => console.log(`PermitProof listening on ${port}`));
+  }
+}
+
+module.exports = { createStore, createServer };
